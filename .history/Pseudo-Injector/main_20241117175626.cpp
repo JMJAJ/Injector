@@ -162,84 +162,68 @@ private:
 
 bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& injectionMethod, const std::wstring& directory, Logger& logger, ApiResolver& apiResolver) {
     if (injectionMethod == "manual") {
-        logger.log("Using manual mapping injection method");
+        LOG("Using manual mapping injection method");
         std::ifstream dllFile(dllPath, std::ios::binary | std::ios::ate);
         if (!dllFile.is_open()) {
-            logger.log("Failed to open DLL file: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
+            LOG("Failed to open DLL file: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
             return false;
         }
+        
         auto dllSize = dllFile.tellg();
         dllFile.seekg(0, std::ios::beg);
-        std::unique_ptr<BYTE[]> pSrcData(new BYTE[dllSize]);
-        dllFile.read(reinterpret_cast<char*>(pSrcData.get()), dllSize);
         
-        logger.log("Attempting manual map injection with DLL size: " + std::to_string(dllSize));
-        bool result = ManualMapDll<const wchar_t*>(proc, pSrcData.get(), dllSize, "preMain", directory.c_str(), directory.size() * 2);
+        LOG("DLL size: " + std::to_string(dllSize) + " bytes");
+        
+        std::vector<BYTE> pSrcData(dllSize);
+        dllFile.read(reinterpret_cast<char*>(pSrcData.data()), dllSize);
+        dllFile.close();
+        
+        LOG("Attempting manual map injection");
+        bool result = ManualMapDll<const wchar_t*>(proc, pSrcData.data(), dllSize, "preMain", directory.c_str(), directory.size() * 2);
+        
         if (!result) {
-            logger.log("Manual mapping failed");
+            LOG("Manual mapping failed");
+            DWORD error = GetLastError();
+            LOG("Last error code: " + std::to_string(error));
         }
+        
         return result;
     }
     else if (injectionMethod == "loadLibrary") {
-        logger.log("Using LoadLibrary injection method");
-        auto LoadLibraryA = reinterpret_cast<FuncPtr>(apiResolver.GetProc("LoadLibraryA"));
-        if (!LoadLibraryA) {
-            logger.log("Failed to resolve LoadLibraryA function");
-            return false;
-        }
-
-        // Convert wide string DLL path to ASCII
-        std::string dllPathA = std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath);
-        logger.log("Attempting LoadLibrary injection with path: " + dllPathA);
+        LOG("Using LoadLibrary injection method");
         
-        // Allocate memory in target process
-        LPVOID pDllPath = VirtualAllocEx(proc, nullptr, dllPathA.size() + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (!pDllPath) {
-            logger.log("Failed to allocate memory in target process. Error: " + std::to_string(GetLastError()));
-            return false;
-        }
-
-        // Write DLL path to target process
-        if (!WriteProcessMemory(proc, pDllPath, dllPathA.c_str(), dllPathA.size() + 1, nullptr)) {
-            logger.log("Failed to write to process memory. Error: " + std::to_string(GetLastError()));
-            VirtualFreeEx(proc, pDllPath, 0, MEM_RELEASE);
-            return false;
-        }
-
-        // Create remote thread to load DLL
-        HANDLE hThread = CreateRemoteThread(proc, nullptr, 0, 
-            reinterpret_cast<LPTHREAD_START_ROUTINE>(LoadLibraryA), 
-            pDllPath, 0, nullptr);
+        // Convert wide string DLL path to TCHAR
+        #ifdef UNICODE
+        std::wstring tcharPath = dllPath;
+        #else
+        std::string tcharPath = std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath);
+        #endif
         
-        if (!hThread) {
-            logger.log("Failed to create remote thread. Error: " + std::to_string(GetLastError()));
-            VirtualFreeEx(proc, pDllPath, 0, MEM_RELEASE);
-            return false;
-        }
-
-        // Wait for thread completion
-        WaitForSingleObject(hThread, INFINITE);
+        LOG("Attempting LoadLibrary injection with path: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
         
-        // Get thread exit code
-        DWORD exitCode = 0;
-        GetExitCodeThread(hThread, &exitCode);
+        // Use the more reliable SetWindowsHookEx injection method
+        bool result = InjectDll(proc, tcharPath.c_str());
         
-        // Cleanup
-        CloseHandle(hThread);
-        VirtualFreeEx(proc, pDllPath, 0, MEM_RELEASE);
-        
-        if (exitCode == 0) {
-            logger.log("LoadLibrary injection failed - DLL load returned 0");
+        if (!result) {
+            LOG("LoadLibrary injection failed");
+            DWORD error = GetLastError();
+            LOG("Last error code: " + std::to_string(error));
             return false;
         }
         
-        logger.log("LoadLibrary injection completed successfully");
+        LOG("LoadLibrary injection completed successfully");
         return true;
     }
     else {
-        logger.log("Invalid injection method: " + injectionMethod);
+        LOG("Invalid injection method: " + injectionMethod);
         return false;
     }
+}
+
+void convertUtf8ToWchar(const char* utf8, wchar_t*& wide) {
+    int length = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    wide = new wchar_t[length];
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, length);
 }
 
 int main() {
@@ -304,20 +288,40 @@ int main() {
     std::string injectionMethodStr = configuredInjectionMethod->c_str();
     LOG("Using injection method: " + injectionMethodStr);
 
-    LOG("Waiting for game process (QRSL.exe)...");
-    DWORD qrslPid = 0;
-    while ((qrslPid = GetProcId(gameExe)) == 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    LOG("Game process found. PID: " + std::to_string(qrslPid));
+    std::cout << "Launcher has been started. Please start the game from the launcher." << std::endl;
 
-    std::wstring dllPath = getDllPath(directory, L"SDK_cheat_menu.dll");
-    LOG("DLL path: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
+    DWORD qrslPid = 0;
+    const char spinChars[] = { '|', '/', '-', '\\' };
+    int spinIndex = 0;
+    auto lastSpinTime = std::chrono::steady_clock::now();
+    const auto spinInterval = std::chrono::milliseconds(100); // Update spinner every 100ms
+
+    LOG("Waiting for game process (QRSL.exe)");
+    while (true) {
+        qrslPid = GetProcId(L"QRSL.exe");
+
+        if (qrslPid != 0) {
+            std::cout << "\rGame process found! PID: " << qrslPid << std::endl;
+            break;
+        }
+
+        // Update spinner animation
+        auto currentTime = std::chrono::steady_clock::now();
+        if (currentTime - lastSpinTime >= spinInterval) {
+            std::cout << "\rWaiting for game process (QRSL.exe) " << spinChars[spinIndex] << std::flush;
+            spinIndex = (spinIndex + 1) % 4;
+            lastSpinTime = currentTime;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    const auto dllPath1 = directory + L"SDK_cheat_menu.dll";
+    LOG("DLL path: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath1));
 
     // Verify DLL exists
-    if (!std::filesystem::exists(dllPath)) {
-        LOG("ERROR: DLL file not found at: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
-        MessageBoxA(NULL, "SDK_cheat_menu.dll not found!", "Error", MB_OK | MB_ICONERROR);
+    if (!std::filesystem::exists(dllPath1)) {
+        LOG("ERROR: DLL file not found at: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath1));
         return 1;
     }
 
@@ -326,7 +330,6 @@ int main() {
     if (!proc) {
         DWORD error = GetLastError();
         LOG("Failed to open process. Error code: " + std::to_string(error));
-        MessageBoxA(NULL, "Failed to open game process! Try running as administrator.", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -334,51 +337,27 @@ int main() {
     bool injected = false;
     LOG("Ready for injection. Press F1 to inject...");
     
-    // Create a window to receive keyboard input
-    WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, DefWindowProc, 0, 0, 
-                      GetModuleHandle(NULL), NULL, NULL, NULL, NULL, L"InjectorWindow", NULL };
-    RegisterClassEx(&wc);
-    HWND hwnd = CreateWindow(wc.lpszClassName, NULL, WS_OVERLAPPED, 
-                            0, 0, 1, 1, NULL, NULL, wc.hInstance, NULL);
-    
-    if (hwnd) {
-        ShowWindow(hwnd, SW_HIDE);
-        MSG msg;
-        
-        while (!injected) {
-            // Process any pending messages
-            while (PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE)) {
-                TranslateMessage(&msg);
-                DispatchMessage(&msg);
-                if (msg.message == WM_QUIT)
+    while (!injected) {
+        if (GetAsyncKeyState(VK_F1) & 0x8000) {
+            LOG("F1 pressed - attempting injection...");
+            
+            // Small delay to prevent multiple injections
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            
+            bool injectionResult = injectDll(proc, dllPath1, injectionMethodStr, directory, Logger::getInstance(), apiResolver);
+            
+            if (injectionResult) {
+                LOG("DLL injection successful!");
+                injected = true;
+            } else {
+                LOG("DLL injection failed - press F1 to retry or ESC to exit");
+                if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
                     break;
-            }
-
-            if (GetAsyncKeyState(VK_F1) & 0x8000) {
-                LOG("F1 pressed - attempting injection...");
-                
-                // Small delay to prevent multiple injections
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                
-                bool injectionResult = injectDll(proc, dllPath, injectionMethodStr, directory, Logger::getInstance(), apiResolver);
-                
-                if (injectionResult) {
-                    LOG("DLL injection successful!");
-                    MessageBoxA(NULL, "Injection successful!", "Success", MB_OK | MB_ICONINFORMATION);
-                    injected = true;
-                } else {
-                    LOG("DLL injection failed!");
-                    if (MessageBoxA(NULL, "Injection failed! Try again?", "Error", 
-                                  MB_RETRYCANCEL | MB_ICONERROR) != IDRETRY) {
-                        break;
-                    }
                 }
             }
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         
-        DestroyWindow(hwnd);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     
     if (!injected) {

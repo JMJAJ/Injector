@@ -191,55 +191,23 @@ bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& inje
     }
     else if (injectionMethod == "loadLibrary") {
         LOG("Using LoadLibrary injection method");
-        auto LoadLibraryA = reinterpret_cast<FuncPtr>(apiResolver.GetProc("LoadLibraryA"));
-        if (!LoadLibraryA) {
-            LOG("Failed to resolve LoadLibraryA function");
-            return false;
-        }
-
-        // Convert wide string DLL path to ASCII
-        std::string dllPathA = std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath);
-        LOG("Attempting LoadLibrary injection with path: " + dllPathA);
         
-        // Allocate memory in target process
-        LPVOID pDllPath = VirtualAllocEx(proc, nullptr, dllPathA.size() + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (!pDllPath) {
-            LOG("Failed to allocate memory in target process. Error: " + std::to_string(GetLastError()));
-            return false;
-        }
-
-        // Write DLL path to target process
-        if (!WriteProcessMemory(proc, pDllPath, dllPathA.c_str(), dllPathA.size() + 1, nullptr)) {
-            LOG("Failed to write to process memory. Error: " + std::to_string(GetLastError()));
-            VirtualFreeEx(proc, pDllPath, 0, MEM_RELEASE);
-            return false;
-        }
-
-        // Create remote thread to load DLL
-        HANDLE hThread = CreateRemoteThread(proc, nullptr, 0, 
-            reinterpret_cast<LPTHREAD_START_ROUTINE>(LoadLibraryA), 
-            pDllPath, 0, nullptr);
+        // Convert wide string DLL path to TCHAR
+        #ifdef UNICODE
+        std::wstring tcharPath = dllPath;
+        #else
+        std::string tcharPath = std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath);
+        #endif
         
-        if (!hThread) {
-            LOG("Failed to create remote thread. Error: " + std::to_string(GetLastError()));
-            VirtualFreeEx(proc, pDllPath, 0, MEM_RELEASE);
-            return false;
-        }
-
-        // Wait for thread completion
-        LOG("Waiting for injection thread to complete...");
-        WaitForSingleObject(hThread, INFINITE);
+        LOG("Attempting LoadLibrary injection with path: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
         
-        // Get thread exit code
-        DWORD exitCode = 0;
-        GetExitCodeThread(hThread, &exitCode);
+        // Use the more reliable SetWindowsHookEx injection method
+        bool result = InjectDll(proc, tcharPath.c_str());
         
-        // Cleanup
-        CloseHandle(hThread);
-        VirtualFreeEx(proc, pDllPath, 0, MEM_RELEASE);
-        
-        if (exitCode == 0) {
-            LOG("LoadLibrary injection failed - DLL load returned 0");
+        if (!result) {
+            LOG("LoadLibrary injection failed");
+            DWORD error = GetLastError();
+            LOG("Last error code: " + std::to_string(error));
             return false;
         }
         

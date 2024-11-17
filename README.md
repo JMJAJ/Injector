@@ -1,4 +1,4 @@
-# Pseudo-Injector v0.0.1b
+# Pseudo-Injector v1.0.0
 
 A robust DLL injection tool with comprehensive logging and multiple injection methods.
 
@@ -49,12 +49,19 @@ Detailed logs are written to:
 
 ## Version History
 
-### v0.0.1b (Initial Beta)
-- Initial release with basic functionality
-- Implemented manual mapping and LoadLibrary injection methods
+### v1.0.0 (Stable Release)
+- Implemented reliable SetWindowsHookEx-based injection
+- Enhanced error handling and logging
+- Improved injection success rate
 - Added comprehensive logging system
 - Added configuration persistence
 - Added F1 hotkey injection trigger
+
+### v0.0.1b (Initial Beta)
+- Initial release with basic functionality
+- Implemented manual mapping and LoadLibrary injection methods
+- Added basic logging system
+- Added configuration persistence
 
 ## License
 
