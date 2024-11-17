@@ -2,6 +2,9 @@
 #include "inject.hpp"
 #include "manual.hpp"
 #include "pch.h"
+#include "version.h"
+#include "stealth.hpp"
+#include "syscalls.hpp"
 
 #pragma warning (disable : 4996)
 
@@ -178,10 +181,23 @@ bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& inje
         dllFile.read(reinterpret_cast<char*>(pSrcData.data()), dllSize);
         dllFile.close();
         
-        LOG("Attempting manual map injection");
+        // Initialize direct syscalls
+        if (!SyscallHelper::InitializeSyscalls()) {
+            LOG("Failed to initialize syscalls");
+            return false;
+        }
+        
+        LOG("Attempting manual map injection with enhanced stealth");
         bool result = ManualMapDll<const wchar_t*>(proc, pSrcData.data(), dllSize, "preMain", directory.c_str(), directory.size() * 2);
         
-        if (!result) {
+        if (result) {
+            // Apply stealth techniques
+            DWORD_PTR moduleBase = 0; // You need to get this from ManualMapDll
+            if (moduleBase) {
+                StealthHelper::RemovePeHeader(proc, moduleBase);
+                StealthHelper::RandomizeTimestamp(proc, (LPVOID)moduleBase);
+            }
+        } else {
             LOG("Manual mapping failed");
             DWORD error = GetLastError();
             LOG("Last error code: " + std::to_string(error));
@@ -190,7 +206,7 @@ bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& inje
         return result;
     }
     else if (injectionMethod == "loadLibrary") {
-        LOG("Using LoadLibrary injection method");
+        LOG("Using LoadLibrary injection method with enhanced stealth");
         
         // Convert wide string DLL path to TCHAR
         #ifdef UNICODE
@@ -201,10 +217,35 @@ bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& inje
         
         LOG("Attempting LoadLibrary injection with path: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
         
-        // Use the more reliable SetWindowsHookEx injection method
+        // Initialize direct syscalls
+        if (!SyscallHelper::InitializeSyscalls()) {
+            LOG("Failed to initialize syscalls");
+            return false;
+        }
+        
+        // Use our enhanced SetWindowsHookEx injection with stealth measures
         bool result = InjectDll(proc, tcharPath.c_str());
         
-        if (!result) {
+        if (result) {
+            // Get the base address of the injected DLL
+            MODULEENTRY32 me32;
+            me32.dwSize = sizeof(MODULEENTRY32);
+            HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetProcessId(proc));
+            
+            if (hSnapshot != INVALID_HANDLE_VALUE) {
+                if (Module32First(hSnapshot, &me32)) {
+                    do {
+                        if (_wcsicmp(me32.szModule, PathFindFileName(tcharPath.c_str())) == 0) {
+                            // Apply stealth techniques
+                            StealthHelper::ErasePEHeader(proc, me32.modBaseAddr);
+                            StealthHelper::RandomizeTimestamp(proc, me32.modBaseAddr);
+                            break;
+                        }
+                    } while (Module32Next(hSnapshot, &me32));
+                }
+                CloseHandle(hSnapshot);
+            }
+        } else {
             LOG("LoadLibrary injection failed");
             DWORD error = GetLastError();
             LOG("Last error code: " + std::to_string(error));
@@ -227,6 +268,7 @@ void convertUtf8ToWchar(const char* utf8, wchar_t*& wide) {
 }
 
 int main() {
+    std::cout << VERSION_INFO << std::endl;
     LOG("Starting injector process");
 
     const wchar_t* launcherExe = L"tof_launcher.exe";

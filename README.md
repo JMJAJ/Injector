@@ -1,4 +1,4 @@
-# Pseudo-Injector v1.0.0
+# Pseudo-Injector v1.0.1
 
 A robust DLL injection tool with comprehensive logging and multiple injection methods.
 
@@ -49,6 +49,12 @@ Detailed logs are written to:
 
 ## Version History
 
+### v1.0.1
+- Enhanced stability and improved anti-detection
+  - Fixed compilation issues with PathFindFileName
+  - Improved NT syscall implementations
+  - Enhanced stealth techniques
+  - Added better error handling
 ### v1.0.0 (Stable Release)
 - Implemented reliable SetWindowsHookEx-based injection
 - Enhanced error handling and logging
