@@ -1,0 +1,19 @@
+{
+    "injectionMethod": "threadHijack",
+    "obfuscateImports": true,
+    "availableMethods": [
+        "manual",
+        "loadLibrary",
+        "threadHijack",
+        "hollow"
+    ],
+    "stealth": {
+        "erasePEHeader": true,
+        "randomizeTimestamp": true,
+        "unlinkFromPEB": true
+    },
+    "logging": {
+        "enabled": true,
+        "level": "debug"
+    }
+}

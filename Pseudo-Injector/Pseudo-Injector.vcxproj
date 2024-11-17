@@ -128,7 +128,12 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>true</EnableUAC>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
+    <Manifest>
+      <AdditionalManifestFiles>app.manifest</AdditionalManifestFiles>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="config.cpp" />
@@ -136,10 +141,22 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="config.hpp" />
+    <ClInclude Include="hijack.hpp" />
+    <ClInclude Include="hollow.hpp" />
     <ClInclude Include="inject.hpp" />
     <ClInclude Include="json.hpp" />
     <ClInclude Include="manual.hpp" />
+    <ClInclude Include="obfuscate.hpp" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="shared.hpp" />
+    <ClInclude Include="shellcode.hpp" />
+    <ClInclude Include="stealth.hpp" />
+    <ClInclude Include="syscalls.hpp" />
+    <ClInclude Include="unlink.hpp" />
+    <ClInclude Include="version.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="app.manifest" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

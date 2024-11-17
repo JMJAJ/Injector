@@ -35,7 +35,8 @@ public:
         DWORD_PTR size = 0x1000;
 
         if (VirtualProtectEx(hProcess, (LPVOID)moduleBase, size, PAGE_READWRITE, &oldProtect)) {
-            SecureZeroMemory((PVOID)moduleBase, size);
+            BYTE zeros[0x1000] = { 0 };
+            WriteProcessMemory(hProcess, (LPVOID)moduleBase, zeros, size, nullptr);
             VirtualProtectEx(hProcess, (LPVOID)moduleBase, size, oldProtect, &oldProtect);
         }
     }

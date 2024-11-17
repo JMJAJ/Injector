@@ -35,15 +35,22 @@ namespace Config {
             GetModuleFileName((HMODULE)handle, (LPWSTR)path, sizeof(path));
             std::wstring dir = std::wstring(path);
             dir = dir.substr(0, dir.find_last_of(L"\\") + 1);
+            // Go up one directory to get to the project root
+            dir = dir.substr(0, dir.find_last_of(L"\\"));
+            dir = dir.substr(0, dir.find_last_of(L"\\") + 1);
             setDirectory(dir);
         }
 
-        filePath = directory + L"\\tof-sih.json";
+        filePath = directory + L"\\config.json";
         std::wcout << L"[DEBUG] Config file path: " << filePath << std::endl;
+
+        // Create directories if they don't exist
+        std::filesystem::create_directories(std::filesystem::path(filePath).parent_path());
 
         if (!std::filesystem::exists(filePath)) {
             std::cout << "[DEBUG] Config file doesn't exist, creating new file" << std::endl;
             std::ofstream file(filePath);
+            file << "{\"injectionMethod\": \"loadLibrary\", \"obfuscateImports\": true, \"availableMethods\": [\"manual\", \"loadLibrary\", \"threadHijack\", \"hollow\"]}" << std::endl;
             file.close();
         }
 
@@ -74,4 +81,17 @@ namespace Config {
         shuttingDown = true;
         actualSave(false);
     }
+
+    void reload() {
+        std::cout << "[DEBUG] Reloading configuration from file" << std::endl;
+        if (std::filesystem::exists(filePath)) {
+            std::ifstream file(filePath);
+            config = nlohmann::json::parse(file);
+            file.close();
+            std::cout << "[DEBUG] Configuration reloaded successfully" << std::endl;
+        } else {
+            std::cout << "[DEBUG] Config file not found during reload" << std::endl;
+        }
+    }
+
 } // namespace Config

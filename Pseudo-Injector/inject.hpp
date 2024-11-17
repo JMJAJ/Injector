@@ -1,5 +1,184 @@
+#pragma once
 #include "pch.h"
 #include <tchar.h>
+#include "config.hpp"
+
+namespace Stealth {
+    class Helper {
+    public:
+        static void ErasePEHeader(HANDLE hProc, LPVOID moduleBase) {
+            DWORD oldProtect;
+            VirtualProtectEx(hProc, moduleBase, 0x1000, PAGE_READWRITE, &oldProtect);
+            
+            BYTE emptyHeader[0x1000] = { 0 };
+            SIZE_T bytesWritten = 0;
+            WriteProcessMemory(hProc, moduleBase, emptyHeader, 0x1000, &bytesWritten);
+            
+            VirtualProtectEx(hProc, moduleBase, 0x1000, oldProtect, &oldProtect);
+        }
+
+        static void RandomizeTimestamp(HANDLE hProc, LPVOID moduleBase) {
+            BYTE headers[0x1000];
+            SIZE_T bytesRead = 0;
+            if (!ReadProcessMemory(hProc, moduleBase, headers, sizeof(headers), &bytesRead))
+                return;
+
+            PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)headers;
+            PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)(headers + dosHeader->e_lfanew);
+            
+            srand((unsigned)time(nullptr));
+            DWORD randomTimestamp = rand();
+            
+            SIZE_T bytesWritten = 0;
+            WriteProcessMemory(hProc, (LPVOID)((BYTE*)moduleBase + dosHeader->e_lfanew + 
+                offsetof(IMAGE_NT_HEADERS, FileHeader.TimeDateStamp)), 
+                &randomTimestamp, sizeof(DWORD), &bytesWritten);
+        }
+    };
+
+    class DllUnlink {
+    public:
+        static bool UnlinkFromPEB(HANDLE hProc, HMODULE hDll) {
+            PROCESS_BASIC_INFORMATION pbi;
+            NTSTATUS status = NtQueryInformationProcess(hProc, ProcessBasicInformation,
+                &pbi, sizeof(pbi), NULL);
+            
+            if (!NT_SUCCESS(status)) return false;
+
+            // Read PEB
+            PEB peb;
+            SIZE_T bytesRead = 0;
+            if (!ReadProcessMemory(hProc, pbi.PebBaseAddress, &peb, sizeof(peb), &bytesRead))
+                return false;
+
+            // Read loader data
+            PEB_LDR_DATA_FULL ldrData = { 0 };
+            bytesRead = 0;
+            if (!ReadProcessMemory(hProc, peb.Ldr, &ldrData, sizeof(ldrData), &bytesRead))
+                return false;
+
+            // Unlink module from all three lists
+            PVOID firstEntry = ldrData.InLoadOrderModuleList.Flink;
+            PVOID currentEntry = firstEntry;
+            
+            do {
+                LDR_DATA_TABLE_ENTRY_FULL currentModule = { 0 };
+                bytesRead = 0;
+                if (!ReadProcessMemory(hProc, currentEntry, &currentModule, sizeof(currentModule), &bytesRead)) {
+                    break;
+                }
+
+                if (currentModule.DllBase == hDll) {
+                    // Unlink from all three lists
+                    const size_t offsetsToUnlink[] = {
+                        offsetof(LDR_DATA_TABLE_ENTRY_FULL, InLoadOrderLinks),
+                        offsetof(LDR_DATA_TABLE_ENTRY_FULL, InMemoryOrderLinks),
+                        offsetof(LDR_DATA_TABLE_ENTRY_FULL, InInitializationOrderLinks)
+                    };
+
+                    for (const auto& offset : offsetsToUnlink) {
+                        SIZE_T bytesWritten = 0;
+                        
+                        // Update Flink's Blink
+                        WriteProcessMemory(hProc,
+                            (PVOID)((ULONG_PTR)currentModule.InLoadOrderLinks.Flink + offset + offsetof(LIST_ENTRY, Blink)),
+                            &currentModule.InLoadOrderLinks.Blink,
+                            sizeof(PVOID),
+                            &bytesWritten);
+
+                        // Update Blink's Flink
+                        WriteProcessMemory(hProc,
+                            (PVOID)((ULONG_PTR)currentModule.InLoadOrderLinks.Blink + offset + offsetof(LIST_ENTRY, Flink)),
+                            &currentModule.InLoadOrderLinks.Flink,
+                            sizeof(PVOID),
+                            &bytesWritten);
+                    }
+
+                    return true;
+                }
+
+                currentEntry = currentModule.InLoadOrderLinks.Flink;
+            } while (currentEntry != firstEntry);
+
+            return false;
+        }
+    };
+
+    class ImportObfuscator {
+    public:
+        static bool ObfuscateImports(HANDLE hProc, LPVOID moduleBase) {
+            BYTE headers[0x1000];
+            SIZE_T bytesRead = 0;
+            if (!ReadProcessMemory(hProc, moduleBase, headers, sizeof(headers), &bytesRead))
+                return false;
+
+            PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)headers;
+            PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)(headers + dosHeader->e_lfanew);
+            
+            // Get import directory
+            IMAGE_DATA_DIRECTORY& importDir = 
+                ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+            // Allocate memory for obfuscated imports
+            LPVOID newImportTable = VirtualAllocEx(hProc, NULL,
+                importDir.Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            
+            if (!newImportTable) return false;
+
+            // Copy and obfuscate import table
+            BYTE* importData = new BYTE[importDir.Size];
+            bytesRead = 0;
+            if (!ReadProcessMemory(hProc, (LPVOID)((BYTE*)moduleBase + importDir.VirtualAddress),
+                importData, importDir.Size, &bytesRead)) {
+                delete[] importData;
+                return false;
+            }
+
+            // Simple XOR obfuscation
+            for (DWORD i = 0; i < importDir.Size; i++)
+                importData[i] ^= 0xFF;
+
+            // Write obfuscated table
+            SIZE_T bytesWritten = 0;
+            WriteProcessMemory(hProc, newImportTable, importData, importDir.Size, &bytesWritten);
+            delete[] importData;
+
+            // Update import directory
+            IMAGE_DATA_DIRECTORY newImportDir = importDir;
+            newImportDir.VirtualAddress = (DWORD)((BYTE*)newImportTable - (BYTE*)moduleBase);
+            
+            bytesWritten = 0;
+            WriteProcessMemory(hProc, (LPVOID)((BYTE*)moduleBase + 
+                offsetof(IMAGE_NT_HEADERS, OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT])),
+                &newImportDir, sizeof(IMAGE_DATA_DIRECTORY), &bytesWritten);
+
+            return true;
+        }
+
+        static bool PreventIATHooking(HANDLE hProc, LPVOID moduleBase) {
+            BYTE headers[0x1000];
+            SIZE_T bytesRead = 0;
+            if (!ReadProcessMemory(hProc, moduleBase, headers, sizeof(headers), &bytesRead))
+                return false;
+
+            PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)headers;
+            PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)(headers + dosHeader->e_lfanew);
+            
+            IMAGE_DATA_DIRECTORY& iatDir = 
+                ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
+
+            DWORD oldProtect;
+            return VirtualProtectEx(hProc,
+                (LPVOID)((BYTE*)moduleBase + iatDir.VirtualAddress),
+                iatDir.Size, PAGE_READONLY, &oldProtect);
+        }
+
+        static bool CloakMemoryRegion(HANDLE hProc, LPVOID address, SIZE_T size) {
+            DWORD oldProtect;
+            return VirtualProtectEx(hProc, address, size, PAGE_NOACCESS, &oldProtect);
+        }
+    };
+}
 
 #ifdef _WIN64
 using f_Routine = UINT_PTR(__fastcall*)(void* pArg);
@@ -25,14 +204,19 @@ struct EnumWindowsCallback_Data {
     HINSTANCE m_hModule;
 };
 
-HINSTANCE GetModuleHandleEx(HANDLE hTargetProc, const TCHAR* lpModuleName) {
+inline HMODULE GetModuleHandleEx(HANDLE hTargetProc, const TCHAR* lpModuleName) {
     MODULEENTRY32 ME32{ 0 };
-    ME32.dwSize = sizeof(ME32);
+    ME32.dwSize = sizeof(MODULEENTRY32);  
 
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetProcessId(hTargetProc));
+    DWORD processId = GetProcessId(hTargetProc);
+    if (processId == 0) {
+        return NULL;
+    }
+
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
     if (hSnap == INVALID_HANDLE_VALUE) {
         while (GetLastError() == ERROR_BAD_LENGTH) {
-            hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetProcessId(hTargetProc));
+            hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
             if (hSnap != INVALID_HANDLE_VALUE)
                 break;
         }
@@ -43,24 +227,20 @@ HINSTANCE GetModuleHandleEx(HANDLE hTargetProc, const TCHAR* lpModuleName) {
     }
 
     BOOL bRet = Module32First(hSnap, &ME32);
-    do {
-        if (!_tcsicmp(lpModuleName, ME32.szModule))
-            break;
-
-        bRet = Module32Next(hSnap, &ME32);
-
-    } while (bRet);
-
-    CloseHandle(hSnap);
-
-    if (!bRet) {
-        return NULL;
+    if (bRet) {
+        do {
+            if (!_tcsicmp(lpModuleName, ME32.szModule)) {
+                CloseHandle(hSnap);
+                return (HINSTANCE)ME32.modBaseAddr;
+            }
+        } while (Module32Next(hSnap, &ME32));
     }
 
-    return ME32.hModule;
+    CloseHandle(hSnap);
+    return NULL;
 }
 
-void* GetProcAddressEx(HANDLE hTargetProc, const TCHAR* lpModuleName, const char* lpProcName) {
+inline void* GetProcAddressEx(HANDLE hTargetProc, const TCHAR* lpModuleName, const char* lpProcName) {
     BYTE* modBase = reinterpret_cast<BYTE*>(GetModuleHandleEx(hTargetProc, lpModuleName));
     if (!modBase)
         return nullptr;
@@ -69,7 +249,8 @@ void* GetProcAddressEx(HANDLE hTargetProc, const TCHAR* lpModuleName, const char
     if (!pe_header)
         return nullptr;
 
-    if (!ReadProcessMemory(hTargetProc, modBase, pe_header, 0x1000, nullptr)) {
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(hTargetProc, modBase, pe_header, 0x1000, &bytesRead)) {
         delete[] pe_header;
 
         return nullptr;
@@ -92,8 +273,9 @@ void* GetProcAddressEx(HANDLE hTargetProc, const TCHAR* lpModuleName, const char
         return nullptr;
     }
 
+    bytesRead = 0;
     if (!ReadProcessMemory(hTargetProc, modBase + pExportEntry->VirtualAddress, export_data, pExportEntry->Size,
-        nullptr)) {
+        &bytesRead)) {
         delete[] export_data;
         delete[] pe_header;
 
@@ -179,7 +361,7 @@ void* GetProcAddressEx(HANDLE hTargetProc, const TCHAR* lpModuleName, const char
     return modBase + FuncRVA;
 }
 
-bool SR_SetWindowsHookEx(HANDLE hTargetProc, f_Routine* pRoutine, void* pArg, DWORD& LastWin32Error, UINT_PTR& Out) {
+inline bool SR_SetWindowsHookEx(HANDLE hTargetProc, f_Routine* pRoutine, void* pArg, DWORD& LastWin32Error, UINT_PTR& Out) {
     void* pCodecave = VirtualAllocEx(hTargetProc, nullptr, 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!pCodecave) {
         LastWin32Error = GetLastError();
@@ -288,7 +470,8 @@ bool SR_SetWindowsHookEx(HANDLE hTargetProc, f_Routine* pRoutine, void* pArg, DW
 
 #endif
 
-    if (!WriteProcessMemory(hTargetProc, pCodecave, Shellcode, sizeof(Shellcode), nullptr)) {
+    SIZE_T bytesWritten = 0;
+    if (!WriteProcessMemory(hTargetProc, pCodecave, Shellcode, sizeof(Shellcode), &bytesWritten)) {
         LastWin32Error = GetLastError();
 
         VirtualFreeEx(hTargetProc, pCodecave, 0, MEM_RELEASE);
@@ -349,7 +532,8 @@ bool SR_SetWindowsHookEx(HANDLE hTargetProc, f_Routine* pRoutine, void* pArg, DW
     BYTE CheckByte = 0;
 
     do {
-        ReadProcessMemory(hTargetProc, reinterpret_cast<BYTE*>(pCodecave) + CheckByteOffset, &CheckByte, 1, nullptr);
+        SIZE_T bytesRead = 0;
+        ReadProcessMemory(hTargetProc, reinterpret_cast<BYTE*>(pCodecave) + CheckByteOffset, &CheckByte, 1, &bytesRead);
 
         if (GetTickCount() - Timer > 5000) {
             return false;
@@ -359,14 +543,15 @@ bool SR_SetWindowsHookEx(HANDLE hTargetProc, f_Routine* pRoutine, void* pArg, DW
 
     } while (!CheckByte);
 
-    ReadProcessMemory(hTargetProc, pCodecave, &Out, sizeof(Out), nullptr);
+    SIZE_T bytesRead = 0;
+    ReadProcessMemory(hTargetProc, pCodecave, &Out, sizeof(Out), &bytesRead);
 
     VirtualFreeEx(hTargetProc, pCodecave, 0, MEM_RELEASE);
 
     return true;
 }
 
-bool InjectDll(HANDLE hProc, const TCHAR* szPath) {
+inline bool InjectDll(HANDLE hProc, const TCHAR* szPath) {
     if (!hProc) {
         DWORD dwErr = GetLastError();
         printf("OpenProcess failed: 0x%08X\n", dwErr);
@@ -385,7 +570,8 @@ bool InjectDll(HANDLE hProc, const TCHAR* szPath) {
         return false;
     }
 
-    BOOL bRet = WriteProcessMemory(hProc, pArg, szPath, len, nullptr);
+    SIZE_T bytesWritten = 0;
+    BOOL bRet = WriteProcessMemory(hProc, pArg, szPath, len, &bytesWritten);
     if (!bRet) {
         DWORD dwErr = GetLastError();
         printf("WriteProcessMemory failed: 0x%08X\n", dwErr);
@@ -422,5 +608,106 @@ bool InjectDll(HANDLE hProc, const TCHAR* szPath) {
 
     printf("Success! LoadLibrary returned 0x%p\n", reinterpret_cast<void*>(hDllOut));
 
+    // Get base address of injected DLL
+    HMODULE hModule = GetModuleHandleEx(hProc, PathFindFileName(szPath));
+    if (hModule) {
+        // Apply advanced stealth techniques
+        Stealth::Helper::ErasePEHeader(hProc, hModule);
+        Stealth::Helper::RandomizeTimestamp(hProc, hModule);
+        
+        // Unlink DLL from PEB
+        if (!Stealth::DllUnlink::UnlinkFromPEB(hProc, hModule)) {
+            return false;
+        }
+        
+        // Obfuscate imports and protect IAT
+        Stealth::ImportObfuscator::ObfuscateImports(hProc, hModule);
+        Stealth::ImportObfuscator::PreventIATHooking(hProc, hModule);
+        
+        // Cloak critical memory regions
+        Stealth::ImportObfuscator::CloakMemoryRegion(hProc, hModule, 0x1000);
+    }
+
     return true;
+}
+
+inline bool LoadLibraryInject(HANDLE hProcess, const std::wstring& dllPath, bool obfuscateImports = false) {
+    // Allocate memory for the DLL path in the target process
+    SIZE_T pathSize = (dllPath.length() + 1) * sizeof(wchar_t);
+    LPVOID remotePath = VirtualAllocEx(hProcess, NULL, pathSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (!remotePath) {
+        return false;
+    }
+
+    // Write the DLL path to the allocated memory
+    SIZE_T bytesWritten = 0;
+    if (!WriteProcessMemory(hProcess, remotePath, dllPath.c_str(), pathSize, &bytesWritten)) {
+        VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Get the address of LoadLibraryW in kernel32.dll
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) {
+        VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    LPTHREAD_START_ROUTINE loadLibraryAddr = 
+        (LPTHREAD_START_ROUTINE)GetProcAddress(kernel32, "LoadLibraryW");
+    if (!loadLibraryAddr) {
+        VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Create a remote thread to call LoadLibraryW
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+        loadLibraryAddr, remotePath, 0, NULL);
+
+    if (!hThread) {
+        VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Wait for the thread to complete
+    WaitForSingleObject(hThread, INFINITE);
+
+    // Get the thread exit code (handle to the loaded module)
+    DWORD exitCode;
+    GetExitCodeThread(hThread, &exitCode);
+
+    // Get module base address
+    MODULEENTRY32W me32;
+    me32.dwSize = sizeof(MODULEENTRY32W);
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetProcessId(hProcess));
+    
+    if (hSnapshot != INVALID_HANDLE_VALUE) {
+        if (Module32FirstW(hSnapshot, &me32)) {
+            do {
+                if (_wcsicmp(me32.szModule, PathFindFileNameW(dllPath.c_str())) == 0) {
+                    // Apply stealth techniques
+                    Stealth::Helper::ErasePEHeader(hProcess, me32.modBaseAddr);
+                    Stealth::Helper::RandomizeTimestamp(hProcess, me32.modBaseAddr);
+                    
+                    // Apply import table obfuscation if enabled
+                    if (obfuscateImports) {
+                        Stealth::ImportObfuscator::ObfuscateImports(hProcess, me32.modBaseAddr);
+                    }
+                    
+                    // Unlink from PEB
+                    Stealth::DllUnlink::UnlinkFromPEB(hProcess, (HMODULE)me32.modBaseAddr);
+                    break;
+                }
+            } while (Module32NextW(hSnapshot, &me32));
+        }
+        CloseHandle(hSnapshot);
+    }
+
+    // Cleanup
+    CloseHandle(hThread);
+    VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);
+
+    return exitCode != 0;
 }

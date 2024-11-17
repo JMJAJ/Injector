@@ -3,8 +3,14 @@
 #include "manual.hpp"
 #include "pch.h"
 #include "version.h"
+#include "hijack.hpp"
+#include "hollow.hpp"
+#include "obfuscate.hpp"
+#include "shellcode.hpp"
+#include <TlHelp32.h>
 #include "stealth.hpp"
 #include "syscalls.hpp"
+#include "shared.hpp"
 
 #pragma warning (disable : 4996)
 
@@ -164,8 +170,10 @@ private:
 };
 
 bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& injectionMethod, const std::wstring& directory, Logger& logger, ApiResolver& apiResolver) {
+    bool result = false;
+
     if (injectionMethod == "manual") {
-        LOG("Using manual mapping injection method");
+        LOG("Attempting manual map injection with enhanced stealth");
         std::ifstream dllFile(dllPath, std::ios::binary | std::ios::ate);
         if (!dllFile.is_open()) {
             LOG("Failed to open DLL file: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
@@ -187,8 +195,7 @@ bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& inje
             return false;
         }
         
-        LOG("Attempting manual map injection with enhanced stealth");
-        bool result = ManualMapDll<const wchar_t*>(proc, pSrcData.data(), dllSize, "preMain", directory.c_str(), directory.size() * 2);
+        result = ManualMapDll<const wchar_t*>(proc, pSrcData.data(), dllSize, "preMain", directory.c_str(), directory.size() * 2);
         
         if (result) {
             // Apply stealth techniques
@@ -202,63 +209,138 @@ bool injectDll(HANDLE proc, const std::wstring& dllPath, const std::string& inje
             DWORD error = GetLastError();
             LOG("Last error code: " + std::to_string(error));
         }
-        
-        return result;
     }
     else if (injectionMethod == "loadLibrary") {
-        LOG("Using LoadLibrary injection method with enhanced stealth");
-        
-        // Convert wide string DLL path to TCHAR
-        #ifdef UNICODE
-        std::wstring tcharPath = dllPath;
-        #else
-        std::string tcharPath = std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath);
-        #endif
-        
-        LOG("Attempting LoadLibrary injection with path: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
-        
-        // Initialize direct syscalls
-        if (!SyscallHelper::InitializeSyscalls()) {
-            LOG("Failed to initialize syscalls");
-            return false;
-        }
-        
-        // Use our enhanced SetWindowsHookEx injection with stealth measures
-        bool result = InjectDll(proc, tcharPath.c_str());
-        
-        if (result) {
-            // Get the base address of the injected DLL
-            MODULEENTRY32 me32;
-            me32.dwSize = sizeof(MODULEENTRY32);
-            HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetProcessId(proc));
-            
-            if (hSnapshot != INVALID_HANDLE_VALUE) {
-                if (Module32First(hSnapshot, &me32)) {
-                    do {
-                        if (_wcsicmp(me32.szModule, PathFindFileName(tcharPath.c_str())) == 0) {
-                            // Apply stealth techniques
-                            StealthHelper::ErasePEHeader(proc, me32.modBaseAddr);
-                            StealthHelper::RandomizeTimestamp(proc, me32.modBaseAddr);
-                            break;
-                        }
-                    } while (Module32Next(hSnapshot, &me32));
-                }
-                CloseHandle(hSnapshot);
-            }
-        } else {
+        LOG("Attempting LoadLibrary injection");
+        bool obfuscateImports = Config::config.contains("obfuscateImports") && Config::config["obfuscateImports"].get<bool>();
+        result = LoadLibraryInject(proc, dllPath, obfuscateImports);
+        if (!result) {
             LOG("LoadLibrary injection failed");
             DWORD error = GetLastError();
             LOG("Last error code: " + std::to_string(error));
+        }
+    }
+    else if (injectionMethod == "threadHijack") {
+        LOG("Attempting Thread Hijacking injection");
+        // Find a suitable thread to hijack
+        HANDLE hThread = nullptr;
+        THREADENTRY32 te32;
+        te32.dwSize = sizeof(THREADENTRY32);
+        
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (hSnapshot != INVALID_HANDLE_VALUE) {
+            if (Thread32First(hSnapshot, &te32)) {
+                do {
+                    if (te32.th32OwnerProcessID == GetProcessId(proc)) {
+                        hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, te32.th32ThreadID);
+                        if (hThread) break;
+                    }
+                } while (Thread32Next(hSnapshot, &te32));
+            }
+            CloseHandle(hSnapshot);
+        }
+        
+        if (hThread) {
+            // Create shellcode for LoadLibrary injection
+            ShellcodeData shellcode = CreateLoadLibraryShellcode(dllPath);
+            if (shellcode.code.empty()) {
+                std::cerr << "Failed to create shellcode" << std::endl;
+                CloseHandle(hThread);
+                return false;
+            }
+            result = ThreadHijacking::HijackThread(proc, hThread, shellcode.code.data(), shellcode.code.size());
+            CloseHandle(hThread);
+        }
+    }
+    else if (injectionMethod == "hollow") {
+        LOG("Attempting Process Hollowing injection");
+        std::ifstream dllFile(dllPath, std::ios::binary | std::ios::ate);
+        if (!dllFile.is_open()) {
+            LOG("Failed to open DLL file: " + std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(dllPath));
             return false;
         }
         
-        LOG("LoadLibrary injection completed successfully");
-        return true;
+        auto dllSize = dllFile.tellg();
+        dllFile.seekg(0, std::ios::beg);
+        
+        LOG("DLL size: " + std::to_string(dllSize) + " bytes");
+        
+        std::vector<BYTE> pSrcData(dllSize);
+        dllFile.read(reinterpret_cast<char*>(pSrcData.data()), dllSize);
+        dllFile.close();
+        
+        result = ProcessHollowing::HollowProcess(proc, pSrcData.data(), dllSize);
     }
     else {
-        LOG("Invalid injection method: " + injectionMethod);
+        LOG("Unknown injection method: " + injectionMethod);
         return false;
     }
+
+    if (result) {
+        // Apply additional stealth techniques
+        DWORD_PTR moduleBase = 0; // You need to get this from the injection method
+        if (moduleBase) {
+            StealthHelper::RemovePeHeader(proc, moduleBase);
+            StealthHelper::RandomizeTimestamp(proc, (LPVOID)moduleBase);
+            
+            // Apply import table obfuscation if requested
+            if (Config::config["obfuscateImports"]) {
+                ImportObfuscator::ObfuscateImports(proc, (LPVOID)moduleBase);
+            }
+        }
+        
+        LOG("Injection successful");
+    } else {
+        LOG("Injection failed");
+    }
+
+    return result;
+}
+
+bool IsElevated() {
+    BOOL fRet = FALSE;
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        TOKEN_ELEVATION Elevation;
+        DWORD cbSize = sizeof(TOKEN_ELEVATION);
+        if (GetTokenInformation(hToken, TokenElevation, &Elevation, sizeof(Elevation), &cbSize)) {
+            fRet = Elevation.TokenIsElevated;
+        }
+    }
+    if (hToken) {
+        CloseHandle(hToken);
+    }
+    return fRet;
+}
+
+HANDLE OpenGameProcess(DWORD processId) {
+    if (!IsElevated()) {
+        LOG("ERROR: Administrator privileges required for process access");
+        return nullptr;
+    }
+
+    HANDLE hProcess = OpenProcess(
+        PROCESS_CREATE_THREAD |
+        PROCESS_QUERY_INFORMATION |
+        PROCESS_VM_OPERATION |
+        PROCESS_VM_WRITE |
+        PROCESS_VM_READ |
+        PROCESS_TERMINATE |
+        SYNCHRONIZE,
+        FALSE,
+        processId
+    );
+
+    if (!hProcess) {
+        DWORD error = GetLastError();
+        LOG("Failed to open process. Error code: " + std::to_string(error));
+        if (error == ERROR_ACCESS_DENIED) {
+            LOG("Access denied. Make sure you're running as administrator");
+        }
+        return nullptr;
+    }
+
+    return hProcess;
 }
 
 void convertUtf8ToWchar(const char* utf8, wchar_t*& wide) {
@@ -275,18 +357,7 @@ int main() {
     const wchar_t* gameExe = L"QRSL.exe";
     
     // Check if the injector is running with admin privileges
-    BOOL isAdmin = FALSE;
-    HANDLE tokenHandle;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tokenHandle)) {
-        TOKEN_ELEVATION elevation;
-        DWORD size = sizeof(TOKEN_ELEVATION);
-        if (GetTokenInformation(tokenHandle, TokenElevation, &elevation, sizeof(elevation), &size)) {
-            isAdmin = elevation.TokenIsElevated;
-        }
-        CloseHandle(tokenHandle);
-    }
-
-    if (!isAdmin) {
+    if (!IsElevated()) {
         LOG("WARNING: Injector is not running with administrator privileges!");
         MessageBoxA(NULL, "Running without admin privileges may cause injection to fail!", "Warning", MB_OK | MB_ICONWARNING);
     }
@@ -326,6 +397,8 @@ int main() {
         return 1;
     }
 
+    // Reload config to get latest injection method
+    Config::reload();
     auto configuredInjectionMethod = Config::get<std::string>("/injectionMethod", "manual");
     std::string injectionMethodStr = configuredInjectionMethod->c_str();
     LOG("Using injection method: " + injectionMethodStr);
@@ -347,10 +420,10 @@ int main() {
     }
 
     LOG("Opening game process...");
-    HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, qrslPid);
+    HANDLE proc = OpenGameProcess(qrslPid);
     if (!proc) {
-        DWORD error = GetLastError();
-        LOG("Failed to open process. Error code: " + std::to_string(error));
+        LOG("Failed to open game process with required permissions");
+        LOG("Please run the injector as administrator");
         return 1;
     }
 

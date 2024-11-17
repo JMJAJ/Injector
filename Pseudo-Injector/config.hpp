@@ -14,7 +14,8 @@ namespace Config {
     void init(HMODULE handle = nullptr);
     void shutdown();
     void save();
-    void actualSave(); // Added function declaration
+    void actualSave();
+    void reload(); // Added function declaration
 
     template <typename T>
     concept isVectorOrSet =
