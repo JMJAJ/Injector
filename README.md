@@ -1,4 +1,4 @@
-# Pseudo-Injector v1.0.2
+# Pseudo-Injector v1.0.3
 
 A robust DLL injection tool with comprehensive logging and multiple injection methods.
 
@@ -13,6 +13,7 @@ A robust DLL injection tool with comprehensive logging and multiple injection me
 - Automatic game process detection
 - Configuration persistence
 - Admin privileges verification
+- Asynchronous configuration saving
 
 ## Requirements
 
@@ -37,16 +38,27 @@ A robust DLL injection tool with comprehensive logging and multiple injection me
 ## Configuration
 
 Configuration is stored in `config.json` and includes:
-- Launcher path
+- Launcher path (persisted between sessions)
 - Injection method preference (default: "loadLibrary")
+- Logging settings
+- Security settings
+- Debug options
 
 ## Logging
 
 Detailed logs are written to:
 - Console output (real-time)
 - `injector.log` file (persistent)
+- Configurable log levels and rotation
 
 ## Version History
+
+### v1.0.3 (Latest)
+- Improved configuration persistence
+- Fixed launcher path saving
+- Enhanced configuration system with async saves
+- Added automatic config backup
+- Improved error handling
 
 ### v1.0.2 (Stable Release)
 - Fixed configuration saving issues
